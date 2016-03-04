@@ -176,6 +176,7 @@ main(int argc, char *argv[])
     for (int i = 0; i < nt; i++) lc[i] = new lock_client_cache(dst);
 
     if(!test || test == 1){
+      printf("test 1\n");
       test1();
     }
 
@@ -234,6 +235,9 @@ main(int argc, char *argv[])
         pthread_join(th[i], NULL);
       }
     }
+
+    for (int i = 0; i < nt; i++)
+      delete lc[i] ;
 
     printf ("%s: passed all tests successfully\n", argv[0]);
 

@@ -16,98 +16,91 @@ lock_server_cache::lock_server_cache()
 }
 
 void
-lock_server::init()
+lock_server_cache::init()
 {
     lock_state_map.clear();
     VERIFY(pthread_mutex_init(&lock_mutex, 0) == 0);
-    VERIFY(pthread_cond_init(&lock_cond, 0) == 0);
 }
 
 
 lock_protocol::status 
 lock_server_cache::acquire(lock_protocol::lockid_t lid, std::string id, 
-                           int &)
+                           int &r)
 {
+    bool revoke = false;
     lock_protocol::status ret = lock_protocol::OK;
 
-    std::map<lock_protocol::lockid_t, server_lock_status>::iterator iter;
-    iter = lock_state_map.find(lid);
-    if (iter != lock_state_map.end()){
-        if (iter->second.hold){
-            //如果等待队列没有这个client, 放入队列
-            bool flag = true;
-            for (std::list<string>::iterator it=iter->second.clt_wait_list.begin(); 
-                it != iter->second.clt_wait_list.end(); ++it){
-                if (*it == id){
-                    flag = false;
-                    break;
-                }
-            }
-            if (flag) {
-                iter->second.clt_wait_list.push_back(id);
-            }
+    std::map<lock_protocol::lockid_t, slock_status>::iterator iter;
 
-            if (id == iter->second.clt_wait_list.front()) {
-                //是否等待成功
-                bool bwait_suc = false;
-                //向holder发送revoke
-                handle h(id);
-                rlock_protocol::status cret;
-                if (h.safebind()) {
-                    cret = h.safebind()->call(rlock_protocol::revoke, lid);
-                }
-                if (h.safebind() && cret == rlock_protocol::OK) {
-                    //退出等待队列
-                    iter->second.clt_wait_list.pop_front();
-                    bwait_suc = true;
-                }
-                //等待释放
-                while (iter != lock_state_map.end() && iter->second.hold == true){
-                    VERIFY(pthread_cond_wait(&lock_cond, &lock_mutex)==0);
-                    printf("== waiting %d request from clt %d\n", (int)lid, clt);
-                }
+    {
+        ScopedLock ml(&lock_mutex);
+        server_acquire_count++;
+        tprintf("%d id %s  lid %d\n", server_acquire_count, id.c_str(), (int)lid);
+        iter = lock_state_map.find(lid);
+        if (iter == lock_state_map.end()) {
+            iter = lock_state_map.insert(std::make_pair(lid, slock_status())).first;
+            VERIFY (iter != lock_state_map.end());
+        }
 
-                //向下一个waiter发送retry
-                while (!iter->second.clt_wait_list.empty()){
-                    std::string dst = iter->second.clt_wait_list.front();
-                    handle h1(dst);
-                    if (h1.safebind()) {
-                        cret = h1.safebind()->call(rlock_protocol::retry, lid);
-                        if (!h1.safebind() || cret != rlock_protocol::OK) {
-                          iter->second.clt_wait_list.pop_front();
-                          continue;
-                        }
-                        break;
-                    } else {
-                        iter->second.clt_wait_list.pop_front();
+        switch (iter->second.slstatus) {
+            case FREE: {
+                    iter->second.slstatus = LOCKED;
+                    iter->second.id = id;
+                    tprintf("    acquire lid %d  id %s\n", (int)lid, id.c_str());
+                }
+                break;
+            case LOCKED: {
+                    if (id != iter->second.id) {
+                        iter->second.slstatus = WAITING;
+                        revoke = true;
+                        iter->second.wait_clients.insert(id);//唯一性
+                        ret = lock_protocol::RETRY;
+                        tprintf("    acquire begin wait lid %d  id %s, owner %s, size %d\n", (int)lid, id.c_str(), iter->second.id.c_str(), (int)iter->second.wait_clients.size());
                     }
                 }
-
-                //返回结果
-                if (bwait_suc)
-                    ret = lock_protocol::OK;
-                else
-                    ret = lock_protocol::RETRY;
-                    goto release;
-            } else {
-                //进入等待队列, 并再请求一次
-                ret = lock_protocol::RETRY;
-                goto release;
-            }
-        } else {
-            iter->second.hold = true;
-            iter->second.id = id;
-            iter->second.clt_wait_list.clear();
+                break;
+            case WAITING: {
+                    if (id != iter->second.id) {
+                        iter->second.wait_clients.insert(id);//唯一性
+                        ret = lock_protocol::RETRY;
+                        tprintf("    acquire wait queue lid %d  id %s, size %d\n", (int)lid, id.c_str(), (int)iter->second.wait_clients.size());
+                    }
+                }
+                break;
+            case RETRYING: {
+                    if (iter->second.wait_clients.count(id)) {
+                        iter->second.wait_clients.erase(id);
+                        iter->second.id = id;
+                        iter->second.slstatus = LOCKED;
+                        if (iter->second.wait_clients.size()) {
+                            iter->second.slstatus = WAITING;
+                            revoke = true;
+                            tprintf("    acquire retry lid %d  id %s, size %d\n", (int)lid, id.c_str(), (int)iter->second.wait_clients.size());
+                        } else {
+                            tprintf("    retry acquire lid %d  id %s\n", (int)lid, id.c_str());
+                        }
+                    } else {
+                        iter->second.wait_clients.insert(id);
+                        ret = lock_protocol::RETRY;
+                        tprintf("    acquire wait queue lid %d  id %s, size %d\n", (int)lid, id.c_str(), (int)iter->second.wait_clients.size());
+                    }
+                }
+                break;
+            default:
+                break;
         }
-    } else {
-        server_lock_status status;
-        status.hold = true;
-        status.id = id;
-        status.clt_wait_list.clear();
-        lock_state_map[lid] = status;
+    }
+    
+    if (revoke) {
+        int cnt = 0;
+        rlock_protocol::status ret = 1;
+        while (ret != 0 && cnt < 7) {
+            cnt++;
+            ret = handle(iter->second.id).safebind()->call(rlock_protocol::revoke, lid, r);
+            tprintf("%s revoke %s ret : %d\n", ret, id.c_str(), iter->second.id.c_str());
+        }
     }
 
-release:
     return ret;
 }
 
@@ -115,17 +108,66 @@ lock_protocol::status
 lock_server_cache::release(lock_protocol::lockid_t lid, std::string id, 
      int &r)
 {
+    bool retry = false;
+    std::string retry_client;
     lock_protocol::status ret = lock_protocol::OK;
 
-    iter = lock_state_map.find(lid);
-    if (iter != lock_state_map.end()) {
-        if (iter->second.hold && iter->second.id == id) {
-            iter->second.hold = false;
-            VERIFY(pthread_cond_broadcast(&lock_cond) == 0);
-            printf("<- release %d request from clt %s\n", (int)lid, id);
+    std::map<lock_protocol::lockid_t, slock_status>::iterator iter;
+
+    {
+        ScopedLock ml(&lock_mutex);
+        server_acquire_count++;
+        tprintf("%d id %s  lid %d\n", server_acquire_count, id.c_str(), (int)lid);
+        iter = lock_state_map.find(lid);
+        if (iter == lock_state_map.end()) {
+            iter = lock_state_map.insert(std::make_pair(lid, slock_status())).first;
+            VERIFY (iter != lock_state_map.end());
+        }
+
+        switch (iter->second.slstatus) {
+            case FREE: {
+                    tprintf("ERROR: id %s release a lid %d when it's state is FREE\n", id.c_str(), (int)lid);//这个说明client的状态跟server的不同步
+                    ret = lock_protocol::IOERR;
+                }
+                break;
+            case LOCKED: {
+                    if (id == iter->second.id) {
+                        iter->second.slstatus = FREE;
+                        iter->second.id = "";
+                        tprintf("    release lid %d  id %s\n", (int)lid, id.c_str());
+                    }
+                }
+                break;
+            case WAITING: {
+                    if (id == iter->second.id) {
+                        iter->second.slstatus = RETRYING;
+                        iter->second.id = "";
+                        retry = true;
+                        retry_client = *iter->second.wait_clients.begin();
+                        tprintf("    release retry lid %d  id %s retry id %s , size %d\n", (int)lid, id.c_str(), retry_client.c_str(), (int)iter->second.wait_clients.size());
+                    }
+                }
+                break;
+            case RETRYING: {
+                    tprintf("ERROR: id %s release a lid %d when it's state is RETRYING\n", id.c_str(), (int)lid);
+                    ret = lock_protocol::IOERR;
+                }
+                break;
+            default:
+                break;
         }
     }
 
+    if (retry) {
+        int cnt = 0;
+        rlock_protocol::status ret = 1;
+        while (ret != 0 && cnt < 7) {
+            cnt++;
+            ret = handle(retry_client).safebind()->call(rlock_protocol::retry, lid, r);
+            tprintf("%s retry %s ret : %d\n", ret, id.c_str(), iter->second.id.c_str());
+        }
+    }
+    
     return ret;
 }
 

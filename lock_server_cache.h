@@ -3,31 +3,37 @@
 
 #include <string>
 
-#include <map>
+#include <set>
 #include "lock_protocol.h"
 #include "rpc.h"
 #include "lock_server.h"
 
+static int                                            server_acquire_count = 0;
 
 class lock_server_cache {
  private:
     //lab 4
-    struct server_lock_status{
-        bool hold; //是否被持有
-        string id;  //ip:port   标记client
-        std::list<string> clt_wait_list;
+    //FREE: 完全没有client占有
+    //LOCKED: 有一个client占有
+    //WAITING: 有client开始等
+    //RETRYING: 将控制权交给等待队列中的一个client
+    enum server_lock_status { FREE, LOCKED, WAITING, RETRYING };
+    struct slock_status {
+      server_lock_status    slstatus;
+      std::string           id;
+      std::set<std::string> wait_clients;
+      slock_status() : slstatus(FREE), id("") {}
     };
  private:
   int nacquire;
   //lab 4
-  pthread_mutex_t                                      lock_mutex;
-  pthread_cond_t                                       lock_cond;
-  std::map<lock_protocol::lockid_t, server_lock_status> lock_state_map;
+  pthread_mutex_t                                       lock_mutex;//保护lock status的变化
+  std::map<lock_protocol::lockid_t, slock_status>       lock_state_map;
  public:
   lock_server_cache();
-  lock_protocol::status stat(lock_protocol::lockid_t, std::string id, int &);
-  lock_protocol::status acquire(lock_protocol::lockid_t, std::string id, int &);
-  lock_protocol::status release(lock_protocol::lockid_t, std::string id, int &);
+  lock_protocol::status stat(lock_protocol::lockid_t, std::string id, int &r);
+  lock_protocol::status acquire(lock_protocol::lockid_t, std::string id, int &r);
+  lock_protocol::status release(lock_protocol::lockid_t, std::string id, int &r);
   //lab 4
   void init();
 };

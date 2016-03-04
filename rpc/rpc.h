@@ -18,13 +18,13 @@
 class rpc_const {
 	public:
 		static const unsigned int bind = 1;   // handler number reserved for bind
-		static const int timeout_failure = -1;
-		static const int unmarshal_args_failure = -2;
-		static const int unmarshal_reply_failure = -3;
-		static const int atmostonce_failure = -4;
-		static const int oldsrv_failure = -5;
-		static const int bind_failure = -6;
-		static const int cancel_failure = -7;
+		static const int timeout_failure = -1;         // 超时
+		static const int unmarshal_args_failure = -2;  // 消息包参数错误
+		static const int unmarshal_reply_failure = -3; // 消息回复错误
+		static const int atmostonce_failure = -4;      // 
+		static const int oldsrv_failure = -5;          // 
+		static const int bind_failure = -6;            // 
+		static const int cancel_failure = -7;          // 
 };
 
 // rpc client endpoint.

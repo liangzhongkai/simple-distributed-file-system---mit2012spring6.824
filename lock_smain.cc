@@ -32,12 +32,14 @@ main(int argc, char *argv[])
   //jsl_set_debug(2);
 
 #ifdef RSM
+  printf("lock_server:\n");
   lock_server ls;
   rpcs server(atoi(argv[1]), count);
   server.reg(lock_protocol::stat, &ls, &lock_server::stat);
   server.reg(lock_protocol::acquire, &ls, &lock_server::acquire);
   server.reg(lock_protocol::release, &ls, &lock_server::release);
 #else
+  printf("lock_server_cache:\n");
   lock_server_cache ls;
   rpcs server(atoi(argv[1]), count);
   server.reg(lock_protocol::stat, &ls, &lock_server_cache::stat);
