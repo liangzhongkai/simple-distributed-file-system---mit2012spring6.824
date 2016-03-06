@@ -36,7 +36,7 @@ lock_client_cache::~lock_client_cache()
   int r;
   std::map<lock_protocol::lockid_t, clock_status>::iterator iter;
   for (iter=lock_status_map.begin(); iter!=lock_status_map.end(); ++iter) {
-    if (iter->second.clstatus != NONE && iter->second.clstatus != ACQUIRING && iter->second.clstatus != RELEASING){
+    if (iter->second.clstatus == FREE || iter->second.clstatus == LOCKED){
       tprintf("<-- end release client %s  lockid %d, return control\n", id.c_str(), (int)iter->first);
       cl->call(lock_protocol::release, iter->first, id, r);
     }
@@ -104,11 +104,13 @@ lock_client_cache::acquire(lock_protocol::lockid_t lid)
         break;
       case ACQUIRING: {
           tprintf("-> status ACQUIRING acquire client %s  lockid %d\n", id.c_str(), (int)lid);
-          //if (!iter->second.flag_retry) {
-          //  tprintf("-> status ACQUIRING wait in acquire queue client %s  lockid %d\n", id.c_str(), lid);
-          //  pthread_cond_wait(&iter->second.cond_retry, &lock_mutex);
-          //} else {
-            //iter->second.flag_retry = true;
+          if (iter->second.flag_retry) {
+            tprintf("-> status ACQUIRING wait in acquire queue client %s  lockid %d\n", id.c_str(), lid);
+            //在retry来之前，第一次请求acquire之后，并进入retry队列，其他都去进入acquire队列
+            //防止在retry之后，retry队列还有其他的线程在等
+            pthread_cond_wait(&iter->second.cond_acquire, &lock_mutex);
+          } else {
+            iter->second.flag_retry = true;
             pthread_mutex_unlock(&lock_mutex);
 
             ret = cl->call(lock_protocol::acquire, lid, id, r);
@@ -119,12 +121,12 @@ lock_client_cache::acquire(lock_protocol::lockid_t lid)
               tprintf("--> end acquire client %s  lockid %d\n", id.c_str(), (int)lid);
               return ret;
             } else if (ret == lock_protocol::RETRY) {
-              if (iter->second.flag_retry) { //拦截获取控制权的命令，一次不需要一个以上的请求
+              if (iter->second.flag_retry) { //retry操作到了之后，不能再放进retry队列
                 tprintf("-> status ACQUIRING wait in retry queue client %s  lockid %d\n", id.c_str(), (int)lid);
                 pthread_cond_wait(&iter->second.cond_retry, &lock_mutex);
               }
             }
-          //}
+          }
         }
         break;
     }
@@ -160,16 +162,17 @@ lock_client_cache::release(lock_protocol::lockid_t lid)
 
     pthread_mutex_lock(&lock_mutex);
     iter->second.clstatus = NONE;
-    pthread_mutex_unlock(&lock_mutex);
-
     pthread_cond_broadcast(&iter->second.cond_release);
-    tprintf("<-- end release client %s  lockid %d, return control\n", id.c_str(), (int)lid);
+    pthread_cond_broadcast(&iter->second.cond_acquire);   //当前cache的一个线程占有锁，其他线程在等待，revoke过来后，要记得触发等待cond_acquire的线程
+    pthread_cond_broadcast(&iter->second.cond_retry);
+    pthread_mutex_unlock(&lock_mutex);
+    tprintf("<-- end release client %s  lockid %d, and return control\n", id.c_str(), (int)lid);
   } else {
     tprintf("<-- end release client %s  lockid %d, but no return control\n", id.c_str(), (int)lid);
     iter->second.clstatus = FREE;
-    pthread_mutex_unlock(&lock_mutex);
-
     pthread_cond_broadcast(&iter->second.cond_acquire);
+    pthread_cond_broadcast(&iter->second.cond_retry);
+    pthread_mutex_unlock(&lock_mutex);
   }
 
   
@@ -196,16 +199,17 @@ lock_client_cache::revoke_handler(lock_protocol::lockid_t lid,
 
   if (iter->second.clstatus == FREE) {//本地lock_client_cache没有线程占有
     iter->second.clstatus = RELEASING;
+    iter->second.flag_revoke = false;
     pthread_mutex_unlock(&lock_mutex);
 
     ret = cl->call(lock_protocol::release, lid, id, r);
 
     pthread_mutex_lock(&lock_mutex);
     iter->second.clstatus = NONE;
-    pthread_mutex_unlock(&lock_mutex);
-
     pthread_cond_broadcast(&iter->second.cond_release);
-    
+    pthread_cond_broadcast(&iter->second.cond_acquire);
+    pthread_cond_broadcast(&iter->second.cond_retry);
+    pthread_mutex_unlock(&lock_mutex);
   } else {
     iter->second.flag_revoke = true;   //这个标记是为使lock的状态转为NONE
     pthread_mutex_unlock(&lock_mutex);
@@ -231,9 +235,8 @@ lock_client_cache::retry_handler(lock_protocol::lockid_t lid,
     return lock_protocol::NOENT;  //没有这个锁
   }
   iter->second.flag_retry = false;
+  pthread_cond_signal(&iter->second.cond_retry);//打开栏栅，可以再次请求
   pthread_mutex_unlock(&lock_mutex);
-
-  pthread_cond_broadcast(&iter->second.cond_retry);//打开栏栅，可以再次请求
 
   tprintf("<== end retry client %s  lockid %d\n", id.c_str(), (int)lid);
   return ret;

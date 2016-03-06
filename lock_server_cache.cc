@@ -28,6 +28,7 @@ lock_server_cache::acquire(lock_protocol::lockid_t lid, std::string id,
                            int &r)
 {
     bool revoke = false;
+    std::string revoke_client;
     lock_protocol::status ret = lock_protocol::OK;
 
     std::map<lock_protocol::lockid_t, slock_status>::iterator iter;
@@ -53,6 +54,7 @@ lock_server_cache::acquire(lock_protocol::lockid_t lid, std::string id,
                     if (id != iter->second.id) {
                         iter->second.slstatus = WAITING;
                         revoke = true;
+                        revoke_client = iter->second.id;
                         iter->second.wait_clients.insert(id);//唯一性
                         ret = lock_protocol::RETRY;
                         tprintf("    acquire begin wait lid %d  id %s, owner %s, size %d\n", (int)lid, id.c_str(), iter->second.id.c_str(), (int)iter->second.wait_clients.size());
@@ -75,9 +77,10 @@ lock_server_cache::acquire(lock_protocol::lockid_t lid, std::string id,
                         if (iter->second.wait_clients.size()) {
                             iter->second.slstatus = WAITING;
                             revoke = true;
-                            tprintf("    acquire retry lid %d  id %s, size %d\n", (int)lid, id.c_str(), (int)iter->second.wait_clients.size());
+                            revoke_client = id;
+                            tprintf("    acquire 1 lid %d  id %s, size %d\n", (int)lid, id.c_str(), (int)iter->second.wait_clients.size());
                         } else {
-                            tprintf("    retry acquire lid %d  id %s\n", (int)lid, id.c_str());
+                            tprintf("    acquire 2 lid %d  id %s\n", (int)lid, id.c_str());
                         }
                     } else {
                         iter->second.wait_clients.insert(id);
@@ -96,8 +99,8 @@ lock_server_cache::acquire(lock_protocol::lockid_t lid, std::string id,
         rlock_protocol::status ret = 1;
         while (ret != 0 && cnt < 7) {
             cnt++;
-            ret = handle(iter->second.id).safebind()->call(rlock_protocol::revoke, lid, r);
-            tprintf("%s revoke %s ret : %d\n", ret, id.c_str(), iter->second.id.c_str());
+            ret = handle(revoke_client).safebind()->call(rlock_protocol::revoke, lid, r);
+            tprintf("%s revoke %s ret : %d\n", id.c_str(), revoke_client.c_str(), ret);
         }
     }
 
@@ -164,10 +167,10 @@ lock_server_cache::release(lock_protocol::lockid_t lid, std::string id,
         while (ret != 0 && cnt < 7) {
             cnt++;
             ret = handle(retry_client).safebind()->call(rlock_protocol::retry, lid, r);
-            tprintf("%s retry %s ret : %d\n", ret, id.c_str(), iter->second.id.c_str());
+            tprintf("%s retry %s ret : %d\n", id.c_str(), retry_client.c_str(), ret);
         }
     }
-    
+
     return ret;
 }
 

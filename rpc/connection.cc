@@ -24,6 +24,8 @@ connection::connection(chanmgr *m1, int f1, int l1)
 	int flags = fcntl(fd_, F_GETFL, NULL);
 	flags |= O_NONBLOCK;
 	fcntl(fd_, F_SETFL, flags);
+	int opt = 1;
+	setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, (const void *) &opt, sizeof(opt));
 
 	signal(SIGPIPE, SIG_IGN);
 	VERIFY(pthread_mutex_init(&m_,0)==0);
